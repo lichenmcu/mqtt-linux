@@ -1,1 +1,3 @@
-./stdoutsub substopic/a --clientid 6301939 --username 86338 --password ubuntu
+#./stdoutsub substopic/a --clientid 6301939 --username 86338 --password ubuntu
+#./stdoutsub substopic/a --clientid 5903623 --username 86338 --password mqtt01 
+./stdoutsub filetopic --file /home/lichen/install --clientid 5903623 --username 86338 --password mqtt01 

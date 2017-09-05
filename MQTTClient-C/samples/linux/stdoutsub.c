@@ -46,9 +46,14 @@
 #include <stdio.h>
 #include <signal.h>
 #include <memory.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <stdlib.h>
 
 #include <sys/time.h>
-
+#include <sys/stat.h>
+#include <sys/mman.h>
 
 volatile int toStop = 0;
 
@@ -93,6 +98,7 @@ struct opts_struct
 	(char*)"stdout-subscriber", 0, (char*)"\n", QOS0, NULL, NULL, (char*)"183.230.40.39", 6002, 1
 };
 
+const char *pathname = NULL;
 
 void getopts(int argc, char** argv)
 {
@@ -158,6 +164,14 @@ void getopts(int argc, char** argv)
 			else
 				opts.nodelimiter = 1;
 		}
+		else if (strcmp(argv[count], "--file") == 0)
+		{
+			if (++count < argc) {
+				pathname = argv[count];
+			}
+			else
+				usage();
+		}
 		else if (strcmp(argv[count], "--showtopics") == 0)
 		{
 			if (++count < argc)
@@ -183,21 +197,70 @@ void messageArrived(MessageData* md)
 	MQTTMessage* message = md->message;
 
 	if (opts.showtopics)
-		printf("%.*s\t", md->topicName->lenstring.len, md->topicName->lenstring.data);
+//		printf("%.*s\t", md->topicName->lenstring.len, md->topicName->lenstring.data);
+		printf("%.*s\t: %dBytes\n", md->topicName->lenstring.len, md->topicName->lenstring.data, (int)message->payloadlen);
+
+#if 0
 	if (opts.nodelimiter)
 		printf("%.*s", (int)message->payloadlen, (char*)message->payload);
 	else
 		printf("%.*s%s", (int)message->payloadlen, (char*)message->payload, opts.delimiter);
-	//fflush(stdout);
+#endif
+
+	fflush(stdout);
+}
+
+int fd;
+void* remap_file(const char *file, unsigned int *len)
+{
+	void *ptr;
+	struct stat sbuf;
+
+	fd = open(file, O_RDONLY);
+	if (fd < 0) {
+		printf ("Can't open %s: %s\n", file, strerror(errno));
+		exit (1);
+	}
+
+	if (fstat(fd, &sbuf) < 0) {
+		printf ("Can't stat %s: %s\n", file, strerror(errno));
+		exit (1);
+	}
+
+	printf("File size: %d\n", (int)sbuf.st_size);
+	ptr = mmap(0, sbuf.st_size, PROT_READ, MAP_SHARED, fd, 0);
+	if ((caddr_t)ptr == (caddr_t)-1) {
+		printf ("Can't read %s: %s\n",file, strerror(errno));
+		exit (1);
+	}
+
+	*len = sbuf.st_size;
+
+	return ptr;
+}
+
+void unremap_file(unsigned char *ptr, unsigned int size)
+{
+	(void) munmap((void *)ptr, size);
+	(void) close (fd);
 }
 
 
+/* the onenet platform only support 64KB (65536-1 = 65535B) */
+#define BUFSIZE	64*1024
+#if 0
+unsigned char buf[BUFSIZE];
+unsigned char readbuf[BUFSIZE];
+#endif
+
 int main(int argc, char** argv)
 {
+#if 1
+	unsigned char *buf = malloc(BUFSIZE);
+	unsigned char *readbuf = malloc(BUFSIZE);
+#endif
+
 	int rc = 0;
-	unsigned char buf[100];
-	unsigned char readbuf[100];
-	
 	if (argc < 2)
 		usage();
 	
@@ -224,7 +287,7 @@ MQTTClient c;
 #else
 	NetworkInit(&n);
 	NetworkConnect(&n, opts.host, opts.port);
-	MQTTClientInit(&c, &n, 1000, buf, 100, readbuf, 100);
+	MQTTClientInit(&c, &n, 1000, buf, BUFSIZE, readbuf, BUFSIZE);
 #endif
 
  
@@ -242,11 +305,70 @@ MQTTClient c;
 	rc = MQTTConnect(&c, &data);
 	printf("Connected %d\n", rc);
     
-    printf("Subscribing to %s\n", topic);
+	int count = 0;
+
+#if 1
+	printf("Subscribing to %s\n", topic);
 	rc = MQTTSubscribe(&c, topic, opts.qos, messageArrived);
 	printf("Subscribed %d\n", rc);
 
-	int count = 0;
+#else
+
+	int i;
+	int cnt = 100;
+	char bufTopic[] = "testTopic/XXXX";
+
+	for (i = 0; i < cnt; i++) {
+		sprintf(bufTopic, "testTopic/%d", i);
+		if (MQTTSubscribe(&c, bufTopic, opts.qos, messageArrived) != 0) {
+			printf("Subscribing to %s Error\n", bufTopic);
+		}
+	}
+
+	while (!toStop) {
+
+		MQTTMessage message;
+		char payload[30];
+
+		message.qos = 1;
+		message.retained = 0;
+		message.payload = payload;
+		sprintf(payload, "message number %d", count++);
+		message.payloadlen = strlen(payload);
+
+		for (i = 0; i < cnt; i++) {
+		
+			sprintf(bufTopic, "testTopic/%d", i);
+			if ((rc = MQTTPublish(&c, bufTopic, &message)) != 0)
+				printf("Return code from MQTT publish is %d\n", rc);
+		}
+
+		MQTTYield(&c, 10000);
+	}
+#endif
+
+
+	unsigned int size;
+	void* ptr;
+	if (pathname != NULL) {
+		ptr = remap_file(pathname, &size);
+	}
+
+	while (!toStop)
+	{
+		MQTTMessage message;
+
+		message.qos = 0;
+		message.retained = 0;
+		message.payload = ptr;
+		message.payloadlen = size;
+
+		if ((rc = MQTTPublish(&c, topic, &message)) != 0)
+			printf("Return code from MQTT publish is %d\n", rc);
+
+		MQTTYield(&c, 5000);
+	}
+
 
 	while (!toStop)
 	{
@@ -259,8 +381,9 @@ MQTTClient c;
 		sprintf(payload, "message number %d", count++);
 		message.payloadlen = strlen(payload);
 
-		if ((rc = MQTTPublish(&c, "substopic/a", &message)) != 0)
+		if ((rc = MQTTPublish(&c, topic, &message)) != 0)
 			printf("Return code from MQTT publish is %d\n", rc);
+		printf("Published: %s\n", topic);
 
 		MQTTYield(&c, 3000);
 	}
