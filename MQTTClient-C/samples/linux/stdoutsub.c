@@ -55,6 +55,17 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 
+
+typedef unsigned int __u32;
+
+#define SWAP_LONG(x) \
+    ((__u32)( \
+        (((__u32)(x) & (__u32)0x000000ffUL) << 24) | \
+        (((__u32)(x) & (__u32)0x0000ff00UL) <<  8) | \
+        (((__u32)(x) & (__u32)0x00ff0000UL) >>  8) | \
+		(((__u32)(x) & (__u32)0xff000000UL) >> 24) ))
+
+
 volatile int toStop = 0;
 
 
@@ -227,7 +238,6 @@ void* remap_file(const char *file, unsigned int *len)
 		exit (1);
 	}
 
-	printf("File size: %d\n", (int)sbuf.st_size);
 	ptr = mmap(0, sbuf.st_size, PROT_READ, MAP_SHARED, fd, 0);
 	if ((caddr_t)ptr == (caddr_t)-1) {
 		printf ("Can't read %s: %s\n",file, strerror(errno));
@@ -247,7 +257,7 @@ void unremap_file(unsigned char *ptr, unsigned int size)
 
 
 /* the onenet platform only support 64KB (65536-1 = 65535B) */
-#define BUFSIZE	64*1024
+#define BUFSIZE	5*1024*1024
 #if 0
 unsigned char buf[BUFSIZE];
 unsigned char readbuf[BUFSIZE];
@@ -274,21 +284,14 @@ int main(int argc, char** argv)
 	getopts(argc, argv);	
 
 	Network n;
-//	Client c;
-MQTTClient c;
+	MQTTClient c;
 
 	signal(SIGINT, cfinish);
 	signal(SIGTERM, cfinish);
 
-#if 0
-	NewNetwork(&n);
-	ConnectNetwork(&n, opts.host, opts.port);
-	MQTTClient(&c, &n, 1000, buf, 100, readbuf, 100);
-#else
 	NetworkInit(&n);
 	NetworkConnect(&n, opts.host, opts.port);
 	MQTTClientInit(&c, &n, 1000, buf, BUFSIZE, readbuf, BUFSIZE);
-#endif
 
  
 	MQTTPacket_connectData data = MQTTPacket_connectData_initializer;       
@@ -307,52 +310,61 @@ MQTTClient c;
     
 	int count = 0;
 
-#if 1
-	printf("Subscribing to %s\n", topic);
-	rc = MQTTSubscribe(&c, topic, opts.qos, messageArrived);
-	printf("Subscribed %d\n", rc);
 
-#else
+#define JSON_BUFSIZ		256
+	unsigned char *jsonbuf = malloc(JSON_BUFSIZ);
+	uint16_t jsize;
 
-	int i;
-	int cnt = 100;
-	char bufTopic[] = "testTopic/XXXX";
+	memset(jsonbuf, 0, JSON_BUFSIZ);
+	char *name = "image-name";
+	char *time = "2017-09-05 22:44:55";
+	char *desc = "imageID";
 
-	for (i = 0; i < cnt; i++) {
-		sprintf(bufTopic, "testTopic/%d", i);
-		if (MQTTSubscribe(&c, bufTopic, opts.qos, messageArrived) != 0) {
-			printf("Subscribing to %s Error\n", bufTopic);
-		}
-	}
+	strcat (jsonbuf, "{\"ds_id\":\"");
+	strcat (jsonbuf, name);
+	strcat (jsonbuf, "\",\"at\":\"");
+	strcat (jsonbuf, time);
+	strcat (jsonbuf, "\",\"desc\":\"");
+	strcat (jsonbuf, desc);
+	strcat (jsonbuf, "\"}");
 
-	while (!toStop) {
+	jsize = strlen(jsonbuf);
+printf("Json: %d\n%s\n", jsize, jsonbuf);
 
-		MQTTMessage message;
-		char payload[30];
-
-		message.qos = 1;
-		message.retained = 0;
-		message.payload = payload;
-		sprintf(payload, "message number %d", count++);
-		message.payloadlen = strlen(payload);
-
-		for (i = 0; i < cnt; i++) {
-		
-			sprintf(bufTopic, "testTopic/%d", i);
-			if ((rc = MQTTPublish(&c, bufTopic, &message)) != 0)
-				printf("Return code from MQTT publish is %d\n", rc);
-		}
-
-		MQTTYield(&c, 10000);
-	}
-#endif
-
-
-	unsigned int size;
+	unsigned int size, big;
 	void* ptr;
 	if (pathname != NULL) {
 		ptr = remap_file(pathname, &size);
 	}
+
+	big = SWAP_LONG(size);
+
+printf("File size: %d\n", size);
+printf("Big  size: %x\n", big);
+
+
+	unsigned char *packet  = malloc(jsize + size + 7);
+	unsigned char *p = (unsigned char *)packet;
+
+	*p++ = 2;
+	*p++ = (jsize & 0x0000ff00UL) >> 8;
+	*p++ = (jsize & 0x000000ffUL);
+	memcpy(p, jsonbuf, jsize);
+	p += jsize;
+	memcpy(p, &big, 4);
+	p += 4;
+	memcpy(p, ptr, size);
+
+#if 1
+	char subtopic[64];
+	memset(subtopic, 0, sizeof(subtopic));
+	sprintf(subtopic, "/%s/%s", opts.clientid, name);
+
+	printf("Subscribing to %s\n", topic);
+	if (MQTTSubscribe(&c, topic, opts.qos, messageArrived) != 0) {
+		printf("Subscribed error: %d\n", rc);
+	}
+#endif
 
 	while (!toStop)
 	{
@@ -360,16 +372,16 @@ MQTTClient c;
 
 		message.qos = 0;
 		message.retained = 0;
-		message.payload = ptr;
-		message.payloadlen = size;
+		message.payload = packet;
+		message.payloadlen = size + jsize + 7;
 
-		if ((rc = MQTTPublish(&c, topic, &message)) != 0)
+		if ((rc = MQTTPublish(&c, "$dp", &message)) != 0)
 			printf("Return code from MQTT publish is %d\n", rc);
 
 		MQTTYield(&c, 5000);
 	}
 
-
+#if 0
 	while (!toStop)
 	{
 		MQTTMessage message;
@@ -387,6 +399,7 @@ MQTTClient c;
 
 		MQTTYield(&c, 3000);
 	}
+#endif
 	
 	printf("Stopping\n");
 
