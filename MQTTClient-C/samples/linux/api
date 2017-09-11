@@ -1,0 +1,10 @@
+#!/bin/bash
+
+# use MQTT topic to get the homeServer ip address
+# here we post the ip to an MQTT topic
+
+apiKey="WD3c4cj0ZAnbIKRGIgn3Bj0aU7M="
+
+ip=`curl http://ipecho.net/plain 2>/dev/null`
+curl --header api-key:$apiKey --data $ip api.heclouds.com/mqtt?topic=ipTopic
+
